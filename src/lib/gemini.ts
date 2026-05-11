@@ -84,6 +84,37 @@ Hãy đưa ra phân tích và gợi ý sửa lỗi chi tiết. Trả về JSON:
   return result.response.text();
 }
 
+export async function analyzeCompetitor(domain: string): Promise<string> {
+  const ai = getGenAI();
+  const model = ai.getGenerativeModel({ model: 'gemini-1.5-flash' });
+
+  const prompt = `Bạn là SEO analyst chuyên nghiệp. Hãy phân tích website "${domain}" dựa trên kiến thức của bạn về website này.
+
+Trả về JSON (chỉ JSON, không có markdown):
+{
+  "estimatedTraffic": <số nguyên, lượt truy cập/tháng ước tính>,
+  "trafficTrend": "<ví dụ: +15% last 3 months hoặc -5% last 3 months>",
+  "domainRating": <số 1-100, uy tín domain>,
+  "totalKeywords": <số từ khóa ước tính đang rank>,
+  "topKeywords": [
+    {"keyword": "...", "position": <1-20>, "volume": <lượt tìm/tháng>}
+  ],
+  "contentStrategy": "<mô tả ngắn chiến lược content của họ>",
+  "topPages": [
+    {"url": "/path", "traffic": <lượt/tháng>, "keywords": <số kw>}
+  ],
+  "contentGaps": ["keyword gap 1", "keyword gap 2", "keyword gap 3", "keyword gap 4", "keyword gap 5"],
+  "strengths": ["điểm mạnh 1", "điểm mạnh 2", "điểm mạnh 3"],
+  "weaknesses": ["điểm yếu 1", "điểm yếu 2"],
+  "aiInsight": "<phân tích tổng hợp và gợi ý cách vượt qua đối thủ này, 2-3 câu>"
+}
+
+Lưu ý: Nếu không biết chính xác về domain này, hãy đưa ra ước tính hợp lý dựa trên loại website (news, ecommerce, blog...) và tên miền.`;
+
+  const result = await model.generateContent(prompt);
+  return result.response.text();
+}
+
 export async function chatWithAgent(message: string, context: string = ''): Promise<string> {
   const ai = getGenAI();
   const model = ai.getGenerativeModel({

@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS competitors_analysis (
   user_id UUID REFERENCES users(id) ON DELETE CASCADE,
   domain TEXT NOT NULL,
   analysis JSONB DEFAULT '{}',
+  data_source TEXT DEFAULT 'mock',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
