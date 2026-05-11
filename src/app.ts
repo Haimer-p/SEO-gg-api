@@ -1,5 +1,6 @@
 import express, { Request, Response, NextFunction } from 'express';
 import { corsMiddleware } from './middleware/cors';
+import { optionalAuth } from './middleware/authMiddleware';
 import auditRouter from './routes/audit';
 import keywordsRouter from './routes/keywords';
 import contentRouter from './routes/content';
@@ -16,6 +17,8 @@ const app = express();
 app.use(corsMiddleware);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+// Apply optional auth globally so req.user is populated on all routes
+app.use(optionalAuth);
 
 app.use((req: Request, res: Response, next: NextFunction) => {
   const start = Date.now();

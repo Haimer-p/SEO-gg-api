@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { query } from '../lib/db';
 
 const router = Router();
 
@@ -24,6 +25,10 @@ interface TopicalMapResponse {
   totalArticlesNeeded: number;
   totalArticlesExisting: number;
   coveragePercent: number;
+}
+
+interface MapRow {
+  map_data: TopicalMapResponse;
 }
 
 function getTopicalMapMock(niche: string): TopicalMapResponse {
@@ -63,9 +68,40 @@ router.post('/generate', async (req: Request<object, object, TopicalMapRequestBo
     return;
   }
 
-  await new Promise((resolve) => setTimeout(resolve, 1500));
+  const userId: string =
+    (req.user as { id?: string } | undefined)?.id ||
+    (req.body as { userId?: string }).userId ||
+    'guest';
+
+  // Check cache (24 hours)
+  try {
+    const cached = await query<MapRow>(
+      `SELECT map_data FROM topical_maps
+       WHERE user_id = $1 AND niche = $2
+         AND created_at > NOW() - INTERVAL '24 hours'
+       LIMIT 1`,
+      [userId, niche]
+    );
+    if (cached.length > 0 && cached[0].map_data) {
+      res.json({ ...cached[0].map_data, cached: true });
+      return;
+    }
+  } catch {
+    // DB not available, continue
+  }
 
   const data = getTopicalMapMock(niche);
+
+  // Save to DB
+  try {
+    await query(
+      `INSERT INTO topical_maps (user_id, niche, map_data) VALUES ($1, $2, $3)`,
+      [userId, niche, JSON.stringify(data)]
+    );
+  } catch {
+    // Ignore: FK violation for guest or DB unavailable
+  }
+
   res.json(data);
 });
 

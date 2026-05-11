@@ -1,18 +1,43 @@
 import { Router, Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
+import { query } from '../lib/db';
 
 const router = Router();
 
 const JWT_SECRET = process.env['JWT_SECRET'] || 'seoai-secret-key-change-in-production';
 
-// Mock user store
-const mockUsers: Record<
-  string,
-  { id: string; name: string; email: string; picture: string; plan: string }
-> = {};
+interface DbUser {
+  id: string;
+  email: string;
+  name: string;
+  avatar: string | null;
+  google_id: string | null;
+  plan: string;
+}
+
+interface UserPayload {
+  id: string;
+  name: string;
+  email: string;
+  picture: string;
+  plan: string;
+}
+
+function signToken(user: UserPayload): string {
+  return jwt.sign(user, JWT_SECRET, { expiresIn: '7d' });
+}
+
+function dbUserToPayload(u: DbUser): UserPayload {
+  return {
+    id: u.id,
+    name: u.name,
+    email: u.email,
+    picture: u.avatar ?? '',
+    plan: u.plan,
+  };
+}
 
 // POST /api/auth/google
-// Frontend sends the Google credential token, backend verifies and returns JWT
 router.post('/google', async (req: Request, res: Response) => {
   try {
     const { credential } = req.body as { credential: string; clientId?: string };
@@ -22,44 +47,69 @@ router.post('/google', async (req: Request, res: Response) => {
       return;
     }
 
-    // Decode the Google JWT payload (base64). In production, verify with Google's public keys.
     const payload = JSON.parse(
       Buffer.from(credential.split('.')[1], 'base64').toString()
     ) as Record<string, string>;
 
-    const user = {
-      id: payload['sub'] || 'google-' + Date.now(),
-      name: payload['name'] || 'Google User',
-      email: payload['email'] || 'user@gmail.com',
-      picture: payload['picture'] || '',
-      plan: 'free',
-    };
+    const googleId = payload['sub'] || 'google-' + Date.now();
+    const name = payload['name'] || 'Google User';
+    const email = payload['email'] || 'user@gmail.com';
+    const picture = payload['picture'] || '';
 
-    mockUsers[user.id] = user;
+    let userPayload: UserPayload = { id: googleId, name, email, picture, plan: 'free' };
 
-    const token = jwt.sign(user, JWT_SECRET, { expiresIn: '7d' });
+    try {
+      const rows = await query<DbUser>(
+        `INSERT INTO users (email, name, avatar, google_id)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (google_id) DO UPDATE
+           SET name = EXCLUDED.name, avatar = EXCLUDED.avatar, updated_at = NOW()
+         RETURNING *`,
+        [email, name, picture, googleId]
+      );
+      if (rows[0]) userPayload = dbUserToPayload(rows[0]);
+    } catch (dbErr) {
+      console.warn('[auth] DB upsert failed, using in-memory fallback:', (dbErr as Error).message);
+    }
 
-    res.json({ success: true, token, user });
+    const token = signToken(userPayload);
+    res.json({ success: true, token, user: userPayload });
   } catch {
     res.status(401).json({ error: 'Invalid Google credential' });
   }
 });
 
-// POST /api/auth/demo-login (for testing without real Google)
-router.post('/demo-login', (req: Request, res: Response) => {
+// POST /api/auth/demo-login
+router.post('/demo-login', async (req: Request, res: Response) => {
   const { name, email } = req.body as { name?: string; email?: string };
 
-  const user = {
+  const demoEmail = email || 'demo@seoai.vn';
+  const demoName = name || 'Demo User';
+
+  let userPayload: UserPayload = {
     id: 'demo-' + Date.now(),
-    name: name || 'Demo User',
-    email: email || 'demo@seoai.vn',
+    name: demoName,
+    email: demoEmail,
     picture: '',
     plan: 'pro',
   };
 
-  const token = jwt.sign(user, JWT_SECRET, { expiresIn: '7d' });
+  try {
+    const rows = await query<DbUser>(
+      `INSERT INTO users (email, name, avatar, google_id, plan)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (email) DO UPDATE
+         SET name = EXCLUDED.name, updated_at = NOW()
+       RETURNING *`,
+      [demoEmail, demoName, '', null, 'pro']
+    );
+    if (rows[0]) userPayload = dbUserToPayload(rows[0]);
+  } catch (dbErr) {
+    console.warn('[auth] DB demo-login failed, using in-memory fallback:', (dbErr as Error).message);
+  }
 
-  res.json({ success: true, token, user });
+  const token = signToken(userPayload);
+  res.json({ success: true, token, user: userPayload });
 });
 
 // GET /api/auth/me

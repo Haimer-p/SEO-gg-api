@@ -1,49 +1,40 @@
 import { Router, Request, Response } from 'express';
+import { query } from '../lib/db';
+import { optionalAuth } from '../middleware/authMiddleware';
 
 const router = Router();
 
-interface Notification {
+interface DbNotification {
+  id: string;
+  user_id: string;
+  type: string;
+  title: string;
+  message: string;
+  read: boolean;
+  created_at: string;
+}
+
+interface NotificationOut {
   id: string;
   type: string;
   title: string;
   message: string;
   timestamp: string;
   read: boolean;
-  data?: Record<string, unknown>;
 }
 
-// Mock notification store (in production this would be a database)
-const notificationStore: Record<string, Notification[]> = {};
+function dbToOut(n: DbNotification): NotificationOut {
+  return {
+    id: n.id,
+    type: n.type,
+    title: n.title,
+    message: n.message,
+    timestamp: n.created_at,
+    read: n.read,
+  };
+}
 
-// GET /api/notifications?userId=xxx
-router.get('/', (req: Request, res: Response) => {
-  const userId = (req.query['userId'] as string) || 'guest';
-  const notifications = notificationStore[userId] || generateMockNotifications();
-  notificationStore[userId] = notifications;
-  res.json({ notifications, unreadCount: notifications.filter((n) => !n.read).length });
-});
-
-// POST /api/notifications/:id/read
-router.post('/:id/read', (req: Request, res: Response) => {
-  const userId = (req.body['userId'] as string) || 'guest';
-  const { id } = req.params;
-  const notifications = notificationStore[userId] || [];
-  const notif = notifications.find((n) => n.id === id);
-  if (notif) notif.read = true;
-  res.json({ success: true });
-});
-
-// POST /api/notifications/read-all
-router.post('/read-all', (req: Request, res: Response) => {
-  const userId = (req.body['userId'] as string) || 'guest';
-  const notifications = notificationStore[userId] || [];
-  notifications.forEach((n) => {
-    n.read = true;
-  });
-  res.json({ success: true });
-});
-
-function generateMockNotifications(): Notification[] {
+function generateMockNotifications(): NotificationOut[] {
   return [
     {
       id: '1',
@@ -86,6 +77,82 @@ function generateMockNotifications(): Notification[] {
       read: true,
     },
   ];
+}
+
+// GET /api/notifications
+router.get('/', optionalAuth, async (req: Request, res: Response) => {
+  const userId = req.user?.id ?? (req.query['userId'] as string | undefined) ?? 'guest';
+
+  if (userId === 'guest') {
+    const notifications = generateMockNotifications();
+    res.json({ notifications, unreadCount: notifications.filter((n) => !n.read).length });
+    return;
+  }
+
+  try {
+    const rows = await query<DbNotification>(
+      'SELECT * FROM notifications WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50',
+      [userId]
+    );
+    const notifications = rows.map(dbToOut);
+    res.json({ notifications, unreadCount: notifications.filter((n) => !n.read).length });
+  } catch (dbErr) {
+    console.warn('[notifications] DB query failed, using mock:', (dbErr as Error).message);
+    const notifications = generateMockNotifications();
+    res.json({ notifications, unreadCount: notifications.filter((n) => !n.read).length });
+  }
+});
+
+// POST /api/notifications/:id/read
+router.post('/:id/read', optionalAuth, async (req: Request, res: Response) => {
+  const userId = req.user?.id ?? (req.body['userId'] as string | undefined) ?? 'guest';
+  const { id } = req.params;
+
+  if (userId === 'guest') {
+    res.json({ success: true });
+    return;
+  }
+
+  try {
+    await query('UPDATE notifications SET read=true WHERE id=$1 AND user_id=$2', [id, userId]);
+  } catch (dbErr) {
+    console.warn('[notifications] DB update failed:', (dbErr as Error).message);
+  }
+
+  res.json({ success: true });
+});
+
+// POST /api/notifications/read-all
+router.post('/read-all', optionalAuth, async (req: Request, res: Response) => {
+  const userId = req.user?.id ?? (req.body['userId'] as string | undefined) ?? 'guest';
+
+  if (userId === 'guest') {
+    res.json({ success: true });
+    return;
+  }
+
+  try {
+    await query('UPDATE notifications SET read=true WHERE user_id=$1', [userId]);
+  } catch (dbErr) {
+    console.warn('[notifications] DB update-all failed:', (dbErr as Error).message);
+  }
+
+  res.json({ success: true });
+});
+
+export async function saveNotification(
+  userId: string,
+  notif: { type: string; title: string; message: string }
+): Promise<void> {
+  try {
+    await query(
+      `INSERT INTO notifications (user_id, type, title, message)
+       VALUES ($1, $2, $3, $4)`,
+      [userId, notif.type, notif.title, notif.message]
+    );
+  } catch (dbErr) {
+    console.warn('[notifications] saveNotification failed:', (dbErr as Error).message);
+  }
 }
 
 export default router;

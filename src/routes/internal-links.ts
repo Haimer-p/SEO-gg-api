@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { query } from '../lib/db';
 
 const router = Router();
 
@@ -19,6 +20,11 @@ interface InternalLinksResponse {
   suggestions: LinkSuggestion[];
   orphanPages: string[];
   topLinkedPages: string[];
+}
+
+interface CacheRow {
+  suggestions: LinkSuggestion[];
+  orphan_pages: string[];
 }
 
 function getInternalLinksMock(siteUrl: string): InternalLinksResponse {
@@ -60,9 +66,45 @@ router.post('/analyze', async (req: Request<object, object, InternalLinksRequest
     return;
   }
 
-  await new Promise((resolve) => setTimeout(resolve, 1500));
+  const userId: string =
+    (req.user as { id?: string } | undefined)?.id ||
+    (req.body as { userId?: string }).userId ||
+    'guest';
+
+  // Check cache (24 hours)
+  try {
+    const cached = await query<CacheRow>(
+      `SELECT suggestions, orphan_pages FROM internal_links_analysis
+       WHERE user_id = $1 AND site_url = $2
+         AND created_at > NOW() - INTERVAL '24 hours'
+       LIMIT 1`,
+      [userId, siteUrl]
+    );
+    if (cached.length > 0) {
+      const row = cached[0];
+      const suggestions = Array.isArray(row.suggestions) ? row.suggestions : [];
+      const orphanPages = Array.isArray(row.orphan_pages) ? row.orphan_pages : [];
+      const topLinkedPages = suggestions.map((s) => s.targetPage).slice(0, 5);
+      res.json({ siteUrl, suggestions, orphanPages, topLinkedPages, cached: true });
+      return;
+    }
+  } catch {
+    // DB not available, continue
+  }
 
   const data = getInternalLinksMock(siteUrl);
+
+  // Save to DB
+  try {
+    await query(
+      `INSERT INTO internal_links_analysis (user_id, site_url, suggestions, orphan_pages)
+       VALUES ($1, $2, $3, $4)`,
+      [userId, siteUrl, JSON.stringify(data.suggestions), JSON.stringify(data.orphanPages)]
+    );
+  } catch {
+    // Ignore: FK violation for guest or DB unavailable
+  }
+
   res.json(data);
 });
 

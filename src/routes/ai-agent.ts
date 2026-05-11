@@ -1,29 +1,38 @@
 import { Router, Request, Response } from 'express';
 import { chatWithAgent } from '../lib/gemini';
-import { getContentMock } from '../mock-data/content.mock';
 import { getKeywordsMock } from '../mock-data/keywords.mock';
 import { getAuditMock } from '../mock-data/audit.mock';
 import { getCompetitorsMock } from '../mock-data/competitors.mock';
-
-// Suppress unused import warning — kept for future tool expansions
-void getContentMock;
+import { query } from '../lib/db';
 
 const router = Router();
 
 interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
-  timestamp: string;
+  created_at?: string;
 }
 
-const chatHistory: Record<string, ChatMessage[]> = {};
+interface ChatHistoryRow {
+  role: 'user' | 'assistant';
+  content: string;
+  created_at: string;
+}
+
+function generateFallbackResponse(message: string): string {
+  const responses = [
+    'Tôi là AI SEO Agent. Tôi có thể giúp bạn:\n- **Audit website**: "Audit https://example.com"\n- **Nghiên cứu từ khóa**: "Tìm từ khóa về máy lọc nước"\n- **Phân tích đối thủ**: "Phân tích đối thủ competitor.com"\n- **Tạo content**: Đi đến trang AI Content\n\nBạn muốn tôi giúp gì?',
+    `Câu hỏi hay! Về "${message}" trong SEO, tôi khuyên bạn nên:\n1. Tối ưu On-page SEO trước (title, H1, meta description)\n2. Xây dựng internal linking\n3. Cải thiện tốc độ trang\n4. Tạo content chất lượng cao`,
+    'Để tôi phân tích yêu cầu của bạn... Vui lòng cung cấp thêm thông tin cụ thể để tôi có thể hỗ trợ tốt hơn!',
+  ];
+  return responses[Math.floor(Math.random() * responses.length)];
+}
 
 // POST /api/agent/chat
 router.post('/chat', async (req: Request, res: Response) => {
-  const { message, sessionId = 'default', userId = 'guest' } = req.body as {
+  const { message, sessionId = 'default' } = req.body as {
     message: string;
     sessionId?: string;
-    userId?: string;
   };
 
   if (!message) {
@@ -31,16 +40,38 @@ router.post('/chat', async (req: Request, res: Response) => {
     return;
   }
 
-  const key = `${userId}-${sessionId}`;
-  if (!chatHistory[key]) chatHistory[key] = [];
+  const userId: string =
+    (req.user as { id?: string } | undefined)?.id ||
+    (req.body as { userId?: string }).userId ||
+    'guest';
 
-  // Build context from conversation history
-  const historyContext = chatHistory[key]
-    .slice(-6)
-    .map((m) => `${m.role}: ${m.content}`)
-    .join('\n');
+  // Load recent history from DB
+  let historyContext = '';
+  try {
+    const historyRows = await query<ChatHistoryRow>(
+      `SELECT role, content FROM chat_history
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT 10`,
+      [userId]
+    );
+    historyContext = historyRows
+      .reverse()
+      .map((m) => `${m.role}: ${m.content}`)
+      .join('\n');
+  } catch {
+    // DB not available, continue without history
+  }
 
-  chatHistory[key].push({ role: 'user', content: message, timestamp: new Date().toISOString() });
+  // Save user message to DB
+  try {
+    await query(
+      `INSERT INTO chat_history (user_id, role, content) VALUES ($1, $2, $3)`,
+      [userId, 'user', message]
+    );
+  } catch {
+    // Ignore: FK violation for guest or DB unavailable
+  }
 
   let aiResponse: string;
   const lowerMsg = message.toLowerCase();
@@ -64,10 +95,10 @@ router.post('/chat', async (req: Request, res: Response) => {
   } else if (lowerMsg.includes('keyword') || lowerMsg.includes('từ khóa')) {
     const queryMatch =
       message.match(/"([^"]+)"|'([^']+)'/) || message.match(/về\s+(\S+)/);
-    const query = queryMatch ? queryMatch[1] || queryMatch[2] : 'seo';
-    const keywords = getKeywordsMock(query, 5);
+    const kw = queryMatch ? (queryMatch[1] ?? queryMatch[2] ?? 'seo') : 'seo';
+    const keywords = getKeywordsMock(kw, 5);
     aiResponse =
-      `Tôi tìm được **${keywords.results.length} từ khóa** cho "${query}":\n\n` +
+      `Tôi tìm được **${keywords.results.length} từ khóa** cho "${kw}":\n\n` +
       `${keywords.results
         .slice(0, 5)
         .map(
@@ -94,43 +125,58 @@ router.post('/chat', async (req: Request, res: Response) => {
     }
   }
 
-  chatHistory[key].push({
-    role: 'assistant',
-    content: aiResponse,
-    timestamp: new Date().toISOString(),
-  });
+  // Save assistant response to DB
+  try {
+    await query(
+      `INSERT INTO chat_history (user_id, role, content) VALUES ($1, $2, $3)`,
+      [userId, 'assistant', aiResponse]
+    );
+  } catch {
+    // Ignore: FK violation for guest or DB unavailable
+  }
 
   res.json({ message: aiResponse, sessionId, timestamp: new Date().toISOString() });
 });
 
-// GET /api/agent/history?sessionId=xxx&userId=xxx
-router.get('/history', (req: Request, res: Response) => {
-  const { sessionId = 'default', userId = 'guest' } = req.query as {
-    sessionId: string;
-    userId: string;
-  };
-  const key = `${userId}-${sessionId}`;
-  res.json({ history: chatHistory[key] || [] });
+// GET /api/agent/history
+router.get('/history', async (req: Request, res: Response) => {
+  const userId: string =
+    (req.user as { id?: string } | undefined)?.id ||
+    (req.query['userId'] as string) ||
+    'guest';
+
+  try {
+    const rows = await query<ChatHistoryRow>(
+      `SELECT role, content, created_at FROM chat_history
+       WHERE user_id = $1
+       ORDER BY created_at ASC
+       LIMIT 50`,
+      [userId]
+    );
+    const history: ChatMessage[] = rows.map((r) => ({
+      role: r.role,
+      content: r.content,
+      created_at: r.created_at,
+    }));
+    res.json({ history });
+  } catch {
+    res.json({ history: [] });
+  }
 });
 
 // DELETE /api/agent/history
-router.delete('/history', (req: Request, res: Response) => {
-  const { sessionId = 'default', userId = 'guest' } = req.body as {
-    sessionId?: string;
-    userId?: string;
-  };
-  const key = `${userId}-${sessionId}`;
-  chatHistory[key] = [];
-  res.json({ success: true });
-});
+router.delete('/history', async (req: Request, res: Response) => {
+  const userId: string =
+    (req.user as { id?: string } | undefined)?.id ||
+    (req.body as { userId?: string }).userId ||
+    'guest';
 
-function generateFallbackResponse(message: string): string {
-  const responses = [
-    'Tôi là AI SEO Agent. Tôi có thể giúp bạn:\n- **Audit website**: "Audit https://example.com"\n- **Nghiên cứu từ khóa**: "Tìm từ khóa về máy lọc nước"\n- **Phân tích đối thủ**: "Phân tích đối thủ competitor.com"\n- **Tạo content**: Đi đến trang AI Content\n\nBạn muốn tôi giúp gì?',
-    `Câu hỏi hay! Về "${message}" trong SEO, tôi khuyên bạn nên:\n1. Tối ưu On-page SEO trước (title, H1, meta description)\n2. Xây dựng internal linking\n3. Cải thiện tốc độ trang\n4. Tạo content chất lượng cao`,
-    'Để tôi phân tích yêu cầu của bạn... Vui lòng cung cấp thêm thông tin cụ thể để tôi có thể hỗ trợ tốt hơn!',
-  ];
-  return responses[Math.floor(Math.random() * responses.length)];
-}
+  try {
+    await query(`DELETE FROM chat_history WHERE user_id = $1`, [userId]);
+    res.json({ success: true });
+  } catch {
+    res.json({ success: false, error: 'Failed to clear history' });
+  }
+});
 
 export default router;

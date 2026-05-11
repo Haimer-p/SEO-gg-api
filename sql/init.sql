@@ -69,3 +69,35 @@ CREATE INDEX IF NOT EXISTS idx_audits_user_id       ON audits(user_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user   ON notifications(user_id, read);
 CREATE INDEX IF NOT EXISTS idx_chat_user_created    ON chat_history(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_content_user         ON generated_content(user_id);
+
+-- Competitors analysis cache
+CREATE TABLE IF NOT EXISTS competitors_analysis (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  domain TEXT NOT NULL,
+  analysis JSONB DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Internal links analysis
+CREATE TABLE IF NOT EXISTS internal_links_analysis (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  site_url TEXT NOT NULL,
+  suggestions JSONB DEFAULT '[]',
+  orphan_pages JSONB DEFAULT '[]',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Topical authority maps
+CREATE TABLE IF NOT EXISTS topical_maps (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  niche TEXT NOT NULL,
+  map_data JSONB DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_competitors_user ON competitors_analysis(user_id, domain);
+CREATE INDEX IF NOT EXISTS idx_internal_links_user ON internal_links_analysis(user_id);
+CREATE INDEX IF NOT EXISTS idx_topical_maps_user ON topical_maps(user_id);
